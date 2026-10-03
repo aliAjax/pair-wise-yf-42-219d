@@ -87,6 +87,15 @@ def create_handler(service, rules, static_dir):
                     return self._send(200, {"items": service.audit_log()})
                 if len(parts) == 3 and parts[:2] == ["api", "entities"]:
                     return self._send(200, service.get(parts[2]))
+                if len(parts) == 3 and parts[:2] == ["api", "review"] and parts[2] == "pending":
+                    return self._send(200, {"items": service.pending_review()})
+                if len(parts) == 4 and parts[:2] == ["api", "animals"] and parts[3] == "pedigree":
+                    query = parse_qs(parsed.query)
+                    date = query.get("date", [None])[0]
+                    generations = query.get("generations", ["3"])[0]
+                    return self._send(200, service.pedigree(parts[2], date, generations))
+                if len(parts) == 4 and parts[:2] == ["api", "animals"] and parts[3] == "revisions":
+                    return self._send(200, {"items": service.revisions(parts[2])})
                 if len(parts) >= 2 and parts[0] == "api":
                     if parts[1] == "entities":
                         raise NotFoundError("not found")
@@ -138,6 +147,8 @@ def create_handler(service, rules, static_dir):
                         200,
                         service.transition(actor, parts[2], parts[3], self._body(), None),
                     )
+                if len(parts) == 3 and parts[:2] == ["api", "review"] and parts[2] == "process":
+                    return self._send(200, {"processed": service.process_reviews()})
                 if len(parts) == 2 and parts[0] == "api":
                     body = self._body()
                     idem = self.headers.get("Idempotency-Key")

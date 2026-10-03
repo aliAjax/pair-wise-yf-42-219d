@@ -26,6 +26,20 @@ python3 app.py --db ./data.db --port 8308
 
 - `animal`：个体谱系；`pairing`：配对建议；`transfer`：机构和运输记录。
 
+## 谱系修订与按日期重建
+
+动物档案只保留最新的父母和状态，但每次个体变更都会按**生效日**保存一条修订（`entity_revisions`）。创建个体或通过 `update_parents` 动作变更父母时，可在数据中传入 `effective_date`（默认为当天）。服务启动时会自动为没有修订的存量动物补一条起始版本（`ensure_baseline_revisions`）。
+
+- `GET /api/animals/<id>/pedigree?date=YYYY-MM-DD&generations=3`：按日期重建该个体的三代祖先。每个祖先都取其在该生效日当天的版本；日期早于首条修订时该祖先标记为 `known:false`。
+- `GET /api/animals/<id>/revisions`：列出该个体的全部修订。
+
+## 配对批准快照与失效复核
+
+- 批准配对（`approve`）时会记下双方当时的版本：`sire_version`、`dam_version` 和亲缘系数，存入配对数据的 `pedigree_snapshot`，作为本次批准的依据。
+- 之后若任一亲本的父母关系发生改动，所有已批准且涉及该亲本的配对会立即失效，状态转为 `pending_review`（待复核），并生成一条待复核任务；原批准结论和快照仍保留可查。
+- 复核重算会用最新修订重建三代谱系并计算亲缘系数：系数 ≤ 阈值则自动复核通过（回到 `approved` 并刷新快照）；超过阈值则保持 `pending_review` 并写明原因。
+- 重算失败时保留待复核项并记录错误，稍后重试；服务重启后会自动接着处理未完成的复核任务。
+
 ## 主要接口
 
 - `GET /health`：健康检查。
@@ -33,6 +47,10 @@ python3 app.py --db ./data.db --port 8308
 - `POST /api/<kind>`：创建对象；请求体为JSON。
 - `GET /api/entities/<id>`：读取对象当前版本。
 - `POST /api/entities/<id>/actions`：提交`{"action":"动作名","data":{...},"expected_version":数字}`。
+- `GET /api/animals/<id>/pedigree?date=&generations=`：按日期重建三代祖先。
+- `GET /api/animals/<id>/revisions`：列出个体修订。
+- `GET /api/review/pending`：列出待复核配对及原因。
+- `POST /api/review/process`：手动触发复核重算。
 - `GET /api/audit`：读取审计记录。
 
 请求身份通过`X-User-Id`和`X-Role`请求头传入。创建和动作的可执行角色由规则引擎控制。

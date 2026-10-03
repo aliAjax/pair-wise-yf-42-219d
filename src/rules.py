@@ -27,6 +27,48 @@ def inbreeding_coefficient(sire, dam):
     return 0.0
 
 
+def coefficient_from_trees(sire_tree, dam_tree):
+    """Simplified Wright inbreeding coefficient from two 3-generation pedigree trees.
+
+    Each node is ``{"animal": {"id": ...}, "sire": ..., "dam": ...}`` and the
+    subject sits at depth 0. For every common ancestor at path lengths ``a``
+    (sire side) and ``b`` (dam side) the contribution is ``(1/2)^(a+b+1)``.
+    """
+
+    def walk(node, depth, accumulator):
+        if not node:
+            return
+        animal = node.get("animal") or {}
+        ancestor_id = animal.get("id")
+        if ancestor_id is not None and ancestor_id not in accumulator:
+            accumulator[ancestor_id] = depth
+        walk(node.get("sire"), depth + 1, accumulator)
+        walk(node.get("dam"), depth + 1, accumulator)
+
+    sire_paths = {}
+    walk(sire_tree, 0, sire_paths)
+    total = 0.0
+    dam_paths = {}
+    walk(dam_tree, 0, dam_paths)
+    for ancestor_id, sire_depth in sire_paths.items():
+        dam_depth = dam_paths.get(ancestor_id)
+        if dam_depth is not None:
+            total += (0.5) ** (sire_depth + dam_depth + 1)
+    return total
+
+
+def _validate_animal_parents(actor, entity, data, lookup):
+    sire = _find_one(lookup, "animal", "id", data.get("sire_id"))
+    dam = _find_one(lookup, "animal", "id", data.get("dam_id"))
+    if not sire or not dam:
+        raise ValidationError("parents must be existing animals")
+    if sire["id"] == entity["id"] or dam["id"] == entity["id"]:
+        raise ValidationError("animal cannot be its own parent")
+    if sire["data"].get("sex") != "male" or dam["data"].get("sex") != "female":
+        raise ValidationError("sire must be male and dam must be female")
+    return {}
+
+
 def _validate_pairing(actor, entity, data, lookup):
     sire = _find_one(lookup, "animal", "id", data.get("sire_id"))
     dam = _find_one(lookup, "animal", "id", data.get("dam_id"))
@@ -40,17 +82,17 @@ def _validate_pairing(actor, entity, data, lookup):
 
 
 CUSTOM_CREATE = {'animal': _validate_animal}
-CUSTOM_TRANSITIONS = {('pairing', 'approve'): _validate_pairing}
+CUSTOM_TRANSITIONS = {('pairing', 'approve'): _validate_pairing, ('animal', 'update_parents'): _validate_animal_parents}
 
 
 class RuleEngine:
     ALIASES = {'animals': 'animal', 'pairings': 'pairing', 'transfers': 'transfer'}
     INITIAL_STATUS = {'animal': 'active', 'pairing': 'proposed', 'transfer': 'planned'}
-    TRANSITIONS = {'animal': {'mark_deceased': (('active',), 'deceased'), 'quarantine_animal': (('active',), 'quarantined'), 'release_quarantine': (('quarantined',), 'active')}, 'pairing': {'approve': (('proposed',), 'approved'), 'reject': (('proposed',), 'rejected'), 'complete': (('approved',), 'completed')}, 'transfer': {'authorize': (('planned',), 'authorized'), 'ship': (('authorized',), 'in_transit'), 'arrive': (('in_transit',), 'completed')}}
+    TRANSITIONS = {'animal': {'mark_deceased': (('active',), 'deceased'), 'quarantine_animal': (('active',), 'quarantined'), 'release_quarantine': (('quarantined',), 'active'), 'update_parents': (('active',), 'active')}, 'pairing': {'approve': (('proposed',), 'approved'), 'reapprove': (('pending_review',), 'approved'), 'reject': (('proposed', 'pending_review'), 'rejected'), 'complete': (('approved',), 'completed')}, 'transfer': {'authorize': (('planned',), 'authorized'), 'ship': (('authorized',), 'in_transit'), 'arrive': (('in_transit',), 'completed')}}
     CREATE_REQUIRED = {'animal': ('name', 'sex'), 'pairing': ('proposed_by',), 'transfer': ('animal_id', 'from_institution', 'to_institution')}
-    ACTION_REQUIRED = {('animal', 'mark_deceased'): ('cause',), ('animal', 'quarantine_animal'): ('reason',), ('pairing', 'approve'): ('sire_id', 'dam_id', 'approvals'), ('pairing', 'reject'): ('reason',), ('pairing', 'complete'): ('offspring_ids',), ('transfer', 'authorize'): ('permit_id',), ('transfer', 'ship'): ('transport_id',), ('transfer', 'arrive'): ('arrival_date',)}
+    ACTION_REQUIRED = {('animal', 'mark_deceased'): ('cause',), ('animal', 'quarantine_animal'): ('reason',), ('animal', 'update_parents'): ('sire_id', 'dam_id'), ('pairing', 'approve'): ('sire_id', 'dam_id', 'approvals'), ('pairing', 'reapprove'): ('approvals',), ('pairing', 'reject'): ('reason',), ('pairing', 'complete'): ('offspring_ids',), ('transfer', 'authorize'): ('permit_id',), ('transfer', 'ship'): ('transport_id',), ('transfer', 'arrive'): ('arrival_date',)}
     CREATE_ROLES = {'animal': ('admin', 'registrar'), 'pairing': ('admin', 'coordinator'), 'transfer': ('admin', 'registrar')}
-    ROLE_ACTIONS = {'mark_deceased': ('admin', 'veterinarian'), 'quarantine_animal': ('admin', 'veterinarian'), 'release_quarantine': ('admin', 'veterinarian'), 'approve': ('admin', 'coordinator'), 'reject': ('admin', 'coordinator'), 'complete': ('admin', 'coordinator'), 'authorize': ('admin', 'registrar'), 'ship': ('admin', 'registrar'), 'arrive': ('admin', 'registrar')}
+    ROLE_ACTIONS = {'mark_deceased': ('admin', 'veterinarian'), 'quarantine_animal': ('admin', 'veterinarian'), 'release_quarantine': ('admin', 'veterinarian'), 'update_parents': ('admin', 'registrar'), 'approve': ('admin', 'coordinator'), 'reapprove': ('admin', 'coordinator'), 'reject': ('admin', 'coordinator'), 'complete': ('admin', 'coordinator'), 'authorize': ('admin', 'registrar'), 'ship': ('admin', 'registrar'), 'arrive': ('admin', 'registrar')}
 
     def normalize_kind(self, kind):
         return self.ALIASES.get(kind, kind)
