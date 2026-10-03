@@ -85,6 +85,21 @@ def create_handler(service, rules, static_dir):
                         return self._send_html(200, handle.read())
                 if parts == ["api", "audit"]:
                     return self._send(200, {"items": service.audit_log()})
+                if parts == ["api", "pending_reviews"]:
+                    return self._send(200, {"items": service.pending_reviews()})
+                if len(parts) == 4 and parts[0] == "api":
+                    if parts[1] == "animals" and parts[3] == "pedigree":
+                        query = parse_qs(parsed.query)
+                        on_date = query.get("date", [None])[0]
+                        if not on_date:
+                            raise ValidationError("date query parameter is required (YYYY-MM-DD)")
+                        return self._send(
+                            200, service.pedigree_as_of(parts[2], on_date[:10])
+                        )
+                    if parts[1] == "animals" and parts[3] == "revisions":
+                        return self._send(200, {"items": service.revisions(parts[2])})
+                    if parts[1] == "pairings" and parts[3] == "approvals":
+                        return self._send(200, {"items": service.approvals(parts[2])})
                 if len(parts) == 3 and parts[:2] == ["api", "entities"]:
                     return self._send(200, service.get(parts[2]))
                 if len(parts) >= 2 and parts[0] == "api":
@@ -107,6 +122,9 @@ def create_handler(service, rules, static_dir):
                 parsed = urlparse(self.path)
                 parts = [part for part in parsed.path.split("/") if part]
                 actor = self._actor()
+                if len(parts) == 4 and parts[:2] == ["api", "pairings"] and parts[3] == "retry":
+                    self._body()
+                    return self._send(200, service.retry_review(actor, parts[2]))
                 if len(parts) == 3 and parts[:2] == ["api", "entities"]:
                     body = self._body()
                     action = body.pop("action", None)

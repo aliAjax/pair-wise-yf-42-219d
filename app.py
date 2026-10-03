@@ -6,7 +6,7 @@ from pathlib import Path
 from src.http_api import create_server
 from src.repository import SQLiteRepository
 from src.rules import RuleEngine
-from src.service import DomainService
+from src.service import DomainService, ReviewWorker
 
 
 def main(argv=None):
@@ -21,17 +21,20 @@ def main(argv=None):
     service = DomainService(repository, rules)
     static_dir = Path(__file__).resolve().parent / "static"
     server = create_server(args.host, args.port, service, rules, str(static_dir))
+    worker = ReviewWorker(service)
 
     def stop(signum, frame):
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, stop)
+    worker.start()
     try:
         print("动物园谱系与繁育协调 listening on http://%s:%s" % (args.host, args.port), flush=True)
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        worker.stop()
         server.server_close()
     return 0
 

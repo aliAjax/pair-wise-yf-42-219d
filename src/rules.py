@@ -27,30 +27,32 @@ def inbreeding_coefficient(sire, dam):
     return 0.0
 
 
-def _validate_pairing(actor, entity, data, lookup):
-    sire = _find_one(lookup, "animal", "id", data.get("sire_id"))
-    dam = _find_one(lookup, "animal", "id", data.get("dam_id"))
-    if not sire or not dam:
-        raise ValidationError("pairing requires two existing animals")
-    if sire["status"] != "active" or dam["status"] != "active":
-        raise ValidationError("pairing animals must be active")
-    if inbreeding_coefficient(sire["data"], dam["data"]) > 0.125:
-        raise ValidationError("pairing exceeds inbreeding threshold")
-    return {"approved_by": actor.user_id}
+def parse_effective_date(value):
+    """Accept YYYY-MM-DD (optionally prefixed ISO timestamp)."""
+    text = str(value)
+    try:
+        parsed = datetime.fromisoformat(text[:10])
+    except ValueError:
+        raise ValidationError("effective_date must be YYYY-MM-DD")
+    return parsed.date().isoformat()
 
 
 CUSTOM_CREATE = {'animal': _validate_animal}
-CUSTOM_TRANSITIONS = {('pairing', 'approve'): _validate_pairing}
+CUSTOM_TRANSITIONS = {}
+
+REVISABLE_FIELDS = ("name", "sire_id", "dam_id", "sex")
+PARENTAGE_FIELDS = ("sire_id", "dam_id")
 
 
 class RuleEngine:
     ALIASES = {'animals': 'animal', 'pairings': 'pairing', 'transfers': 'transfer'}
     INITIAL_STATUS = {'animal': 'active', 'pairing': 'proposed', 'transfer': 'planned'}
-    TRANSITIONS = {'animal': {'mark_deceased': (('active',), 'deceased'), 'quarantine_animal': (('active',), 'quarantined'), 'release_quarantine': (('quarantined',), 'active')}, 'pairing': {'approve': (('proposed',), 'approved'), 'reject': (('proposed',), 'rejected'), 'complete': (('approved',), 'completed')}, 'transfer': {'authorize': (('planned',), 'authorized'), 'ship': (('authorized',), 'in_transit'), 'arrive': (('in_transit',), 'completed')}}
+    TRANSITIONS = {'animal': {'mark_deceased': (('active',), 'deceased'), 'quarantine_animal': (('active',), 'quarantined'), 'release_quarantine': (('quarantined',), 'active'), 'revise': (('active', 'quarantined', 'deceased'), None)}, 'pairing': {'approve': (('proposed',), 'approved'), 'reject': (('proposed',), 'rejected'), 'complete': (('approved',), 'completed'), 'recheck': (('needs_review',), 'approved')}, 'transfer': {'authorize': (('planned',), 'authorized'), 'ship': (('authorized',), 'in_transit'), 'arrive': (('in_transit',), 'completed')}}
     CREATE_REQUIRED = {'animal': ('name', 'sex'), 'pairing': ('proposed_by',), 'transfer': ('animal_id', 'from_institution', 'to_institution')}
     ACTION_REQUIRED = {('animal', 'mark_deceased'): ('cause',), ('animal', 'quarantine_animal'): ('reason',), ('pairing', 'approve'): ('sire_id', 'dam_id', 'approvals'), ('pairing', 'reject'): ('reason',), ('pairing', 'complete'): ('offspring_ids',), ('transfer', 'authorize'): ('permit_id',), ('transfer', 'ship'): ('transport_id',), ('transfer', 'arrive'): ('arrival_date',)}
     CREATE_ROLES = {'animal': ('admin', 'registrar'), 'pairing': ('admin', 'coordinator'), 'transfer': ('admin', 'registrar')}
-    ROLE_ACTIONS = {'mark_deceased': ('admin', 'veterinarian'), 'quarantine_animal': ('admin', 'veterinarian'), 'release_quarantine': ('admin', 'veterinarian'), 'approve': ('admin', 'coordinator'), 'reject': ('admin', 'coordinator'), 'complete': ('admin', 'coordinator'), 'authorize': ('admin', 'registrar'), 'ship': ('admin', 'registrar'), 'arrive': ('admin', 'registrar')}
+    ROLE_ACTIONS = {'mark_deceased': ('admin', 'veterinarian'), 'quarantine_animal': ('admin', 'veterinarian'), 'release_quarantine': ('admin', 'veterinarian'), 'revise': ('admin', 'registrar'), 'approve': ('admin', 'coordinator'), 'reject': ('admin', 'coordinator'), 'complete': ('admin', 'coordinator'), 'recheck': ('admin', 'coordinator'), 'authorize': ('admin', 'registrar'), 'ship': ('admin', 'registrar'), 'arrive': ('admin', 'registrar')}
+    INBREEDING_LIMIT = 0.125
 
     def normalize_kind(self, kind):
         return self.ALIASES.get(kind, kind)
@@ -73,6 +75,9 @@ class RuleEngine:
             if value is None or value == "" or value == [] or value == {}:
                 raise ValidationError("missing required field: " + field)
 
+    def parse_effective_date(self, value):
+        return parse_effective_date(value)
+
     def validate_create(self, actor, kind, data, lookup=None):
         kind = self.normalize_kind(kind)
         if kind not in self.INITIAL_STATUS:
@@ -83,6 +88,39 @@ class RuleEngine:
         if custom:
             custom(actor, data, lookup)
         return dict(data)
+
+    def evaluate_pairing(self, actor, sire_view, dam_view):
+        """Validate the two animals against the pairing rules using the
+        revision views captured at decision time. Returns audit extras."""
+        if not sire_view or not dam_view:
+            raise ValidationError("pairing requires two existing animals")
+        if sire_view["status"] != "active" or dam_view["status"] != "active":
+            raise ValidationError("pairing animals must be active")
+        coefficient = inbreeding_coefficient(sire_view["data"], dam_view["data"])
+        if coefficient > self.INBREEDING_LIMIT:
+            raise ValidationError("pairing exceeds inbreeding threshold")
+        return {"approved_by": actor.user_id, "inbreeding": coefficient}
+
+    def validate_revise(self, actor, entity, data):
+        self._ensure_role(actor, self.ROLE_ACTIONS["revise"])
+        payload = dict(data)
+        if "sex" in payload and payload["sex"] not in ("male", "female", "unknown"):
+            raise ValidationError("sex must be male, female or unknown")
+        changes = {
+            field: payload[field]
+            for field in REVISABLE_FIELDS
+            if field in payload and payload[field] != entity["data"].get(field)
+        }
+        if not changes:
+            raise ValidationError("revision changes nothing")
+        parentage_changed = any(field in PARENTAGE_FIELDS for field in changes)
+        reason = payload.get("reason")
+        if not reason:
+            raise ValidationError("missing required field: reason")
+        effective_date = parse_effective_date(
+            payload.get("effective_date") or datetime.utcnow().date().isoformat()
+        )
+        return changes, effective_date, parentage_changed
 
     def validate_transition(self, actor, entity, action, data, lookup=None):
         kind = self.normalize_kind(entity["kind"])
@@ -101,6 +139,8 @@ class RuleEngine:
         self._require(data, self.ACTION_REQUIRED.get((kind, action), ()))
         custom = CUSTOM_TRANSITIONS.get((kind, action))
         extra = custom(actor, entity, data, lookup) if custom else {}
+        if next_status is None:
+            next_status = entity["status"]
         patch = dict(data)
         if extra:
             patch.update(extra)
